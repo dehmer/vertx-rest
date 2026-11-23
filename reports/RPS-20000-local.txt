@@ -1,0 +1,62 @@
+
+         /\      Grafana   /‾‾/
+    /\  /  \     |\  __   /  /
+   /  \/    \    | |/ /  /   ‾‾\
+  /          \   |   (  |  (‾)  |
+ / __________ \  |_|\_\  \_____/
+
+
+     execution: local
+        script: glyph.js
+        output: -
+
+     scenarios: (100.00%) 1 scenario, 300 max VUs, 3m0s max duration (incl. graceful stop):
+              * glyph_load: Up to 20000.00 iterations/s for 2m30s over 5 stages (maxVUs: 100-300, gracefulStop: 30s)
+
+WARN[0141] Insufficient VUs, reached 300 active VUs and cannot initialize more  executor=ramping-arrival-rate scenario=glyph_load
+
+
+  █ THRESHOLDS
+
+    checks
+    ✓ 'rate>0.99' rate=100.00%
+
+    http_req_duration
+    ✓ 'p(95)<300' p(95)=15.45ms
+    ✓ 'p(99)<600' p(99)=16.86ms
+
+    http_req_failed
+    ✓ 'rate<0.01' rate=0.00%
+
+
+  █ TOTAL RESULTS
+
+    checks_total.......: 2430606 16202.787957/s
+    checks_succeeded...: 100.00% 2430606 out of 2430606
+    checks_failed......: 0.00%   0 out of 2430606
+
+    ✓ status is 200
+    ✓ content type is JSON
+
+    HTTP
+    http_req_duration..............: avg=2.73ms min=63µs    med=99µs     max=26.38ms p(90)=14.63ms p(95)=15.45ms
+      { expected_response:true }...: avg=2.73ms min=63µs    med=99µs     max=26.38ms p(90)=14.63ms p(95)=15.45ms
+    http_req_failed................: 0.00%   0 out of 1215303
+    http_reqs......................: 1215303 8101.393978/s
+
+    EXECUTION
+    dropped_iterations.............: 1178    7.852727/s
+    iteration_duration.............: avg=2.75ms min=74.91µs med=116.29µs max=26.61ms p(90)=14.65ms p(95)=15.47ms
+    iterations.....................: 1215303 8101.393978/s
+    vus............................: 258     min=0            max=262
+    vus_max........................: 300     min=100          max=300
+
+    NETWORK
+    data_received..................: 1.8 GB  12 MB/s
+    data_sent......................: 91 MB   608 kB/s
+
+
+
+
+running (2m30.0s), 000/300 VUs, 1215303 complete and 0 interrupted iterations
+glyph_load ✓ [======================================] 000/300 VUs  2m30s  20000.00 iters/s
