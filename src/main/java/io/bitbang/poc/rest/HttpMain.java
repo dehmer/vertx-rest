@@ -4,6 +4,8 @@ import io.vertx.core.Future;
 import io.vertx.core.Vertx;
 import io.vertx.core.VertxOptions;
 import io.vertx.core.http.HttpServer;
+import io.vertx.core.http.HttpServerResponse;
+import io.vertx.core.json.JsonObject;
 import io.vertx.ext.web.Router;
 import io.vertx.pgclient.PgBuilder;
 import io.vertx.pgclient.PgConnectOptions;
@@ -13,7 +15,9 @@ import org.slf4j.LoggerFactory;
 
 import java.util.List;
 import java.util.concurrent.ThreadLocalRandom;
+import java.util.UUID;
 
+import io.bitbang.poc.rest.k6.*;
 
 class HttpMain {
 
@@ -58,9 +62,12 @@ class HttpMain {
         // defaults:
         // * eventLoopPoolSize = 24 (Mac mini M2 Pro)
         VertxOptions options = new VertxOptions();
+        int eventLoopPoolSize = options.getEventLoopPoolSize();
+        LOGGER.debug("eventLoopPoolSize: " + eventLoopPoolSize);
 
         Vertx vertx = Vertx.vertx(options);
 
+        // TODO: .setCachePreparedStatements(true)
         PgConnectOptions connectOptions = new PgConnectOptions()
             .setHost("/tmp")
             .setPort(5432)
@@ -68,6 +75,7 @@ class HttpMain {
             .setUser("postgres");
 
         // Pool options
+        // TODO: set max size to `eventLoopPoolSize`
         PoolOptions poolOptions = new PoolOptions()
             .setMaxSize(12);
 
@@ -79,45 +87,127 @@ class HttpMain {
                 .using(vertx) // re-use Http event loop for SQL
                 .build();
 
-        Router router = Router.router(vertx);
 
-        /**
-         * Get random Kanji/Kana glyph.
-         */
-        router.get("/glyph").handler(ctx -> {
-            // TODO: Pooled client does not really benefit from prepared statement
-            PreparedQuery<RowSet<Row>> query = client.preparedQuery("SELECT * FROM glyph WHERE id=$1");
-            Future<RowSet<Row>> pending = query.execute(Tuple.of(randomId()));
-            Future<Response> response = pending
-                .map(rows -> rows.size() == 0
-                        ? TextResponse.notFound()
-                        : JsonResponse.ok(rows.iterator().next().toJson())
-                )
-                .recover(err -> Future.succeededFuture(
-                        TextResponse.internalError(err.getMessage())
-                ));
+        vertx.deployVerticle(new K6StateVerticle())
+            .onSuccess(instanceId -> {
+                K6Store store = new EventBusK6Store(vertx.eventBus());
 
-            response.onSuccess(result -> result.apply(ctx));
-        });
+                Router router = Router.router(vertx);
 
-        router.get("/literal").handler(ctx -> {
-            String sql = "SELECT * FROM glyph WHERE dataset = 'ETL9B' AND literal=$1";
-            PreparedQuery<RowSet<Row>> query = client.preparedQuery(sql);
-            Future<RowSet<Row>> pending = query.execute(Tuple.of(randomLiteral()));
-            // TODO: stream result as TSV
-        });
+                /**
+                 * Get random Kanji/Kana glyph.
+                 */
+                router.get("/glyph").handler(ctx -> {
+                    // TODO: Pooled client does not really benefit from prepared statement
+                    PreparedQuery<RowSet<Row>> query = client.preparedQuery("SELECT * FROM glyph WHERE id=$1");
+                    Future<RowSet<Row>> pending = query.execute(Tuple.of(randomId()));
+                    Future<Response> response = pending
+                        .map(rows -> rows.size() == 0
+                                ? TextResponse.notFound()
+                                : JsonResponse.ok(rows.iterator().next().toJson())
+                        )
+                        .recover(err -> Future.succeededFuture(
+                                TextResponse.internalError(err.getMessage())
+                        ));
 
-        HttpServer httpServer = vertx.createHttpServer();
-        httpServer.requestHandler(router);
+                    response.onSuccess(result -> result.apply(ctx));
+                });
 
-        httpServer
-            .listen(8080, "0.0.0.0")
-            .onSuccess(server ->
-                    LOGGER.info("TCP server listening on port {}",
-                            server.actualPort()))
-            .onFailure(error -> {
-                LOGGER.error("Could not start TCP server", error);
-                vertx.close();
-            });
+                router.get("/literal").handler(ctx -> {
+                    String sql = "SELECT * FROM glyph WHERE dataset = 'ETL9B' AND literal=$1";
+                    PreparedQuery<RowSet<Row>> query = client.preparedQuery(sql);
+                    Future<RowSet<Row>> pending = query.execute(Tuple.of(randomLiteral()));
+                    // TODO: stream result as TSV
+                });
+
+
+                // Workers request/join a shared run ID.
+                // $ curl -X POST http://localhost:8080/k6-started
+                // router.post("/k6-started").handler(ctx -> {
+                //     // TODO: update state with new k6 instance; return run ID
+                //     String bogusId = UUID.randomUUID().toString();
+                //     LOGGER.info("[/k6-started] " + bogusId);
+                //     HttpServerResponse response = ctx.response();
+                //     response.putHeader("content-type", "text/plain");
+                //     response.end(bogusId);
+                // });
+
+                router.post("/k6-started").handler(ctx ->
+                    store.workerStarted()
+                        .onSuccess(id -> ctx.response()
+                            .putHeader("content-type", "text/plain")
+                            .end(id.toString())
+                        )
+                        .onFailure(ctx::fail)
+                );
+
+
+                /*
+                    Workers upload their JSON summary report.
+                    $ curl -X POST http://localhost:8080/k6-finished/2c21bd5e-6dcb-40dd-9d31-52f6a130cd74 \
+                        -H "Content-Type: application/json" \
+                        -d '{}'
+                */
+                // router.post("/k6-finished/:id").handler(ctx -> {
+                //     // TODO: update state with new report; return pending k6 instance count
+
+                //     String id = ctx.request().getParam("id");
+                //     ctx.request().bodyHandler(buffer -> {
+                //         String report = buffer.toString();
+                //         LOGGER.info("k6-finished: " + id);
+                //         LOGGER.info("k6-finished: " + report);
+                //         ctx.response()
+                //             .end();
+                //     });
+                // });
+
+                router.post("/k6-finished/:id").handler(ctx -> {
+                    UUID id = UUID.fromString(ctx.request().getParam("id"));
+                    ctx.request().bodyHandler(buffer -> {
+                        store.workerFinished(id, buffer.toString())
+                            .onSuccess(pending -> {
+                                LOGGER.info("[/k6-finished/:id] pending=" + pending);
+                                ctx.response().end(String.valueOf(pending));
+                            })
+                            .onFailure(ctx::fail);
+                    }
+
+                    );
+                });
+
+                /*
+                    Fetch merged results for a given run ID.
+                    Either called by the "last" worker or by each worker for intermediate result.
+                    $ curl http://localhost:8080/k6-report/2c21bd5e-6dcb-40dd-9d31-52f6a130cd74
+                */
+                // router.get("/k6-report/:id").handler(ctx -> {
+                //     String id = ctx.request().getParam("id");
+                //     // TODO: merge reports to single report and return as JSON
+                //     JsonObject aggregate = new JsonObject();
+                //     ctx.json(aggregate);
+                // });
+                router.get("/k6-report/:id").handler(ctx -> {
+                    UUID id = UUID.fromString(ctx.request().getParam("id"));
+                    store.report(id)
+                        .onSuccess(ctx::json)
+                        .onFailure(ctx::fail);
+                });
+
+                HttpServer httpServer = vertx.createHttpServer();
+                httpServer.requestHandler(router);
+
+                httpServer
+                    .listen(8080, "0.0.0.0")
+                    .onSuccess(server ->
+                            LOGGER.info("TCP server listening on port {}",
+                                    server.actualPort()))
+                    .onFailure(error -> {
+                        LOGGER.error("Could not start TCP server", error);
+                        vertx.close();
+                    });
+
+            })
+            .onFailure(err -> LOGGER.error("Could not deploy state verticle", err));
+
     }
 }
